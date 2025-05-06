@@ -1,11 +1,11 @@
 import os
 
-from sklearn.model_selection import StratifiedGroupKFold
+from sklearn.model_selection import StratifiedKFold
 import pandas as pd
 from torch.utils.data import DataLoader
 
 from config.config import config
-from src.process_data.utils import get_train_test, compute_rgb_mean_std, transform_function, ALSDataset, augment_images
+from src.process_data.utils import get_train_test, compute_rgb_mean_std, transform_function, ALSDataset, augment_images, compute_class_weights
 
 def prepare_folds():
 
@@ -15,23 +15,22 @@ def prepare_folds():
     df = df[["Image No", "Case ID", "Category"]].copy()
 
     # Initializing StratifiedGroupKFold
-    sgkf = StratifiedGroupKFold(n_splits=config.no_of_folds, shuffle=True, random_state=42)
+    sgkf = StratifiedKFold(n_splits=config.no_of_folds, shuffle=True, random_state=42)
 
     # Creating a new colum in the DataFrame to store fold assignments
     df["fold"] = -1
 
     # Applying the split and assign folds
-    for fold, (train_idx, val_idx) in enumerate(sgkf.split(X=df, y=df["Category"], groups=df["Case ID"])):
+    for fold, (train_idx, val_idx) in enumerate(sgkf.split(X=df, y=df["Category"])):
         df.loc[val_idx, "fold"] = fold
 
     # Saving the DataFrame
-    keys_path = os.path.join(config.dataset_dir_path,"image_keys_with_fold")
+    keys_path = os.path.join(config.dataset_dir_path,f"image_keys_with_fold")
     df.to_csv(keys_path, index=False)
 
 
-def get_dataloaders(fold):
+def get_dataloaders_and_classweights(fold):
 
-    print("\tinstantiating the train and val dataloaders")
     # getting the train and test dats for the fold
     train_image_paths, val_image_paths, train_labels, val_labels = get_train_test(fold)
 
@@ -42,12 +41,17 @@ def get_dataloaders(fold):
     # augmenting the train images
     train_image_paths, train_labels = augment_images(train_image_paths, train_labels)
 
+    # getting the class_weights for loss calculation
+    class_weights = compute_class_weights(train_labels)
+
+
     # instantiating the torch datasets
     train_dataset = ALSDataset(train_image_paths, train_labels, transform)
     val_dataset = ALSDataset(val_image_paths, val_labels, transform)
 
+    print("\tinstantiating the train and val dataloaders")
     # instantiating the torch dataloaders
     train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False)
 
-    return train_loader, val_loader
+    return train_loader, val_loader, class_weights

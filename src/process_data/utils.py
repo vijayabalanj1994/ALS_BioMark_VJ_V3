@@ -1,6 +1,7 @@
 import os
 import shutil
 from PIL import Image
+from collections import Counter
 
 import pandas as pd
 import cv2
@@ -13,7 +14,7 @@ from config.config import config
 
 def get_train_test(fold):
 
-    print(f"\tsplitting into train and test for flod: {fold}")
+    print(f"\tsplitting into train and test for fold: {fold}")
     # Loading the image key's with fold file
     keys_path = os.path.join(config.dataset_dir_path, "image_keys_with_fold")
     df = pd.read_csv(keys_path)
@@ -33,16 +34,14 @@ def get_train_test(fold):
     def make_paths_and_labels(sub_df):
         image_paths = [os.path.join(config.dataset_dir_path,"images",f"{int(row['Image No'])}.tif") for _,row in sub_df.iterrows()]
         labels = [label_map[row["Category"]] for _,row in sub_df.iterrows()]
-        case_ids = [row["Case ID"] for _,row in sub_df.iterrows()]
-        return image_paths, labels, case_ids
+        return image_paths, labels
 
-    train_image_paths, train_labels, train_case_ids = make_paths_and_labels(train_df)
-    val_image_paths, val_labels, val_case_ids = make_paths_and_labels(val_df)
+    train_image_paths, train_labels = make_paths_and_labels(train_df)
+    val_image_paths, val_labels = make_paths_and_labels(val_df)
 
-    if any(item in set(val_case_ids) for item in set(train_case_ids)):
-        print("\tthere is overlap between training and testing data.")
-    else:
-        print("\tno overlap between training and testing data.")
+    #printing data distribution stats
+    print(f"\ttrain data distribution:- {Counter(train_labels)}")
+    print(f"\tval data distribution:- {Counter(val_labels)}")
 
     return train_image_paths, val_image_paths, train_labels, val_labels
 
@@ -102,7 +101,9 @@ def save_augmented_image(folder, base_name, suffix, image, train_image_paths, tr
     train_labels.append(label)
 
 def augment_images(img_paths, labels):
+
     data_folder = os.path.join(config.dataset_dir_path, 'augmented_training_data')
+
     if os.path.exists(data_folder):
         shutil.rmtree(data_folder)
         print(f"\tDeleted folder: {data_folder}")
@@ -115,54 +116,147 @@ def augment_images(img_paths, labels):
     train_labels = []
 
     for img_path, label in zip(img_paths, labels):
+
+        # the original image
         img_color = cv2.imread(img_path)
-        if img_color is None:
-            print(f"Warning: Skipping invalid image {img_path}")
-            continue
+        img_gray = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
 
+        original_folder = os.path.join(data_folder, "original")
+        if not os.path.exists(original_folder):
+            os.makedirs(original_folder)
+        output_path = os.path.join(original_folder, os.path.basename(img_path))
+        cv2.imwrite(output_path, img_color)
+        train_image_paths.append(output_path)
+        train_labels.append(label)
+
+        # flipping the image
+        flipped_img = cv2.flip(img_color, 1)
+
+        flip_folder = os.path.join(data_folder, "flipped")
+        if not os.path.exists(flip_folder):
+            os.makedirs(flip_folder)
+        output_path = os.path.join(flip_folder, os.path.basename(img_path))
+        cv2.imwrite(output_path, flipped_img)
+        train_image_paths.append(output_path)
+        train_labels.append(label)
+
+        # rotating the image
         h, w = img_color.shape[:2]
-        base_name = os.path.splitext(os.path.basename(img_path))[0]
+        center = (w //2, h//2)
+        m= cv2.getRotationMatrix2D(center, 90, 1)
+        rotated_img = cv2.warpAffine(img_color, m, (h, w))
 
-        # 1. Original
-        save_augmented_image(os.path.join(data_folder, "original"), base_name, "orig", img_color, train_image_paths, train_labels, label)
+        rotate_folder = os.path.join(data_folder, "rotated")
+        if not os.path.exists(rotate_folder):
+            os.makedirs(rotate_folder)
+        output_path = os.path.join(rotate_folder, os.path.basename(img_path))
+        cv2.imwrite(output_path, rotated_img)
+        train_image_paths.append(output_path)
+        train_labels.append(label)
 
-        # 2. Horizontal Flip
-        hflip = cv2.flip(img_color, 1)
-        save_augmented_image(os.path.join(data_folder, "hflip"), base_name, "hflip", hflip, train_image_paths, train_labels, label)
+        # converting into grayscale (but retains 3-channels)
+        grayscale_3channel_img = cv2.cvtColor(img_gray, cv2.COLOR_GRAY2BGR)
 
-        # 3. Vertical Flip
-        vflip = cv2.flip(img_color, 0)
-        save_augmented_image(os.path.join(data_folder, "vflip"), base_name, "vflip", vflip, train_image_paths, train_labels, label)
+        gray_folder = os.path.join(data_folder, "gray")
+        if not os.path.exists(gray_folder):
+            os.makedirs(gray_folder)
+        output_path = os.path.join(gray_folder, os.path.basename(img_path))
+        cv2.imwrite(output_path, grayscale_3channel_img)
+        train_image_paths.append(output_path)
+        train_labels.append(label)
 
-        # 4. Rotation ±15°
-        for angle in [-15, 15]:
-            M = cv2.getRotationMatrix2D((w // 2, h // 2), angle, 1.0)
-            rotated = cv2.warpAffine(img_color, M, (w, h))
-            save_augmented_image(os.path.join(data_folder, "rotated"), base_name, f"rot{angle}", rotated, train_image_paths, train_labels, label)
+        # edge detection of images
+        edges = cv2.Canny(img_gray, 50, 150)
+        dilated_edges = cv2.dilate(edges, None, iterations=2)
+        mask = cv2.threshold(dilated_edges, 127, 255, cv2.THRESH_BINARY_INV)[1]
 
-        # 5. Brightness/Contrast
-        bright = cv2.convertScaleAbs(img_color, alpha=1.1, beta=10)
-        dark = cv2.convertScaleAbs(img_color, alpha=0.9, beta=-10)
-        save_augmented_image(os.path.join(data_folder, "brightness"), base_name, "bright", bright, train_image_paths, train_labels, label)
-        save_augmented_image(os.path.join(data_folder, "brightness"), base_name, "dark", dark, train_image_paths, train_labels, label)
+        # grayscale denoising of images
+        gray_denoised_img = cv2.bilateralFilter(img_gray, d=15, sigmaColor=30, sigmaSpace=75)
+        gray_denoised_img = cv2.bitwise_and(gray_denoised_img, mask) + cv2.bitwise_and(img_gray, cv2.bitwise_not(mask))
+        gray_3channel_denoised_img = cv2.cvtColor(gray_denoised_img, cv2.COLOR_GRAY2BGR)
 
-        # 6. Blur
-        blurred = cv2.GaussianBlur(img_color, (5, 5), 0)
-        save_augmented_image(os.path.join(data_folder, "blur"), base_name, "blur", blurred, train_image_paths, train_labels, label)
+        gray_denoising = os.path.join(data_folder, "gray_denoising")
+        if not os.path.exists(gray_denoising):
+            os.makedirs(gray_denoising)
+        output_path = os.path.join(gray_denoising, os.path.basename(img_path))
+        cv2.imwrite(output_path, gray_3channel_denoised_img)
+        train_image_paths.append(output_path)
+        train_labels.append(label)
 
-        # 7. Gaussian Noise
-        noise = np.random.normal(0, 10, img_color.shape).astype(np.uint8)
-        noisy = cv2.add(img_color, noise)
-        save_augmented_image(os.path.join(data_folder, "noise"), base_name, "noise", noisy, train_image_paths, train_labels, label)
+        # color denoising of images
+        color_denoised_img = cv2.bilateralFilter(img_color, d=15, sigmaColor=30, sigmaSpace=75)
+        color_denoised_img = cv2.bitwise_and(color_denoised_img, color_denoised_img,mask=mask) + cv2.bitwise_and(img_color, img_color,mask=cv2.bitwise_not(mask))
 
-        # 8. Scaling (0.9x)
-        scaled = cv2.resize(img_color, (int(w * 0.9), int(h * 0.9)))
-        scaled_full = cv2.copyMakeBorder(scaled, 0, h - scaled.shape[0], 0, w - scaled.shape[1], cv2.BORDER_CONSTANT, value=0)
-        save_augmented_image(os.path.join(data_folder, "scaled"), base_name, "scaled", scaled_full, train_image_paths, train_labels, label)
+        color_denoising = os.path.join(data_folder, "color_denoising")
+        if not os.path.exists(color_denoising):
+            os.makedirs(color_denoising)
+        output_path = os.path.join(color_denoising, os.path.basename(img_path))
+        cv2.imwrite(output_path, color_denoised_img)
+        train_image_paths.append(output_path)
+        train_labels.append(label)
 
-        # 9. Cropping
-        cropped = img_color[10:-10, 10:-10]
-        cropped_resized = cv2.resize(cropped, (w, h))
-        save_augmented_image(os.path.join(data_folder, "cropped"), base_name, "crop", cropped_resized, train_image_paths, train_labels, label)
+        # scaling the image to scale FACTOR 0.9
+        scaled_img = cv2.resize(img_color, (int(h*0.9), int(w*0.9)))
+
+        scale_folder = os.path.join(data_folder, "scaled")
+        if not os.path.exists(scale_folder):
+            os.makedirs(scale_folder)
+        output_path = os.path.join(scale_folder, os.path.basename(img_path))
+        cv2.imwrite(output_path, scaled_img)
+        train_image_paths.append(output_path)
+        train_labels.append(label)
+
+        # cropping the image with crop size (10,10)
+        cropped_img = img_color[10:(h-10), 10:(w-10)]
+
+        crop_folder = os.path.join(data_folder, "cropped")
+        if not os.path.exists(crop_folder):
+            os.makedirs(crop_folder)
+        output_path = os.path.join(crop_folder, os.path.basename(img_path))
+        cv2.imwrite(output_path, cropped_img)
+        train_image_paths.append(output_path)
+        train_labels.append(label)
+
+        # adding noise to image at noice level 10
+        noise = np.random.randint(0,10,img_color.shape, dtype="uint8")
+        noisy_img =cv2.add(img_color, noise)
+
+        noise_folder = os.path.join(data_folder, "noisy")
+        if not os.path.exists(noise_folder):
+            os.makedirs(noise_folder)
+        output_path = os.path.join(noise_folder, os.path.basename(img_path))
+        cv2.imwrite(output_path, noisy_img)
+        train_image_paths.append(output_path)
+        train_labels.append(label)
+
+        # perspective transformation of images
+        src_points = np.float32([[0, 0], [w-1, 0], [0, h-1], [w-1, h-1]])
+        dst_points = src_points + np.random.normal(0, 5, src_points.shape).astype(np.float32)
+        M = cv2.getPerspectiveTransform(src_points, dst_points)
+        trans_img = cv2.warpPerspective(img_color, M, (w, h))
+
+        perspective_folder = os.path.join(data_folder, "perspective_transformed")
+        if not os.path.exists(perspective_folder):
+            os.makedirs(perspective_folder)
+        output_path = os.path.join(perspective_folder, os.path.basename(img_path))
+        cv2.imwrite(output_path, trans_img)
+        train_image_paths.append(output_path)
+        train_labels.append(label)
 
     return train_image_paths, train_labels
+
+
+def compute_class_weights(labels, num_classes=3):
+    counter = Counter(labels)
+    total = sum(counter.values())
+
+    class_weights = []
+    for i in range(num_classes):
+        class_count = counter.get(i,0)
+        if class_count > 0:
+            weight = total/(num_classes*class_count)
+        else:
+            weight = 0
+        class_weights.append(weight)
+
+    return torch.tensor(class_weights, dtype=torch.float)

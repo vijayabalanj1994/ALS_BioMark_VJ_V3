@@ -1,5 +1,6 @@
 /dataset/augmented_training_data
-
+/saved_models
+/Internal
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
